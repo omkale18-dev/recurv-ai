@@ -31,12 +31,16 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
 
 RELEVANT_EVENTS = {
     "payment.failed",
-    "subscription.charge.failed",
-    "subscription.pending",
-    "payment_link.expired",
-    "payment_link.paid",
     "payment.captured",
     "order.paid",
+    "payment_link.paid",
+    "payment_link.expired",
+    "payment_link.cancelled",
+    "subscription.pending",
+    "subscription.charged",
+    "subscription.halted",
+    "subscription.activated",
+    "subscription.cancelled",
 }
 
 
@@ -90,18 +94,39 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 def handle_event(db: Session, event_type: str, payload: dict):
+    """Handle incoming webhook events.
+
+    NOTE: Webhook processing is deliberately asynchronous. This handler only
+    records the event and creates/updates the Case row in the database.
+    It does NOT execute recovery actions inline, ensuring fast webhook response
+    times (<100ms) and decoupling event ingestion from action execution.
+    """
     entity = payload.get("payload", {})
 
-    if event_type in ("payment.failed", "subscription.charge.failed"):
+    if event_type in ("payment.failed", "subscription.pending"):
         payment_entity = entity.get("payment", {}).get("entity", {})
         subscription_entity = entity.get("subscription", {}).get("entity", {})
 
         payment_id = payment_entity.get("id")
         subscription_id = subscription_entity.get("id")
-        amount = (payment_entity.get("amount", 0) or 0) / 100
-        decline_reason = payment_entity.get("error_reason") or payment_entity.get("error_description")
-        payment_method = payment_entity.get("method")
-        customer_id = payment_entity.get("customer_id") or payment_entity.get("contact")
+        
+        # Calculate amount
+        amount_paise = payment_entity.get("amount")
+        if amount_paise is None and subscription_entity:
+            amount_paise = subscription_entity.get("plan", {}).get("item", {}).get("amount", 0)
+        amount = (amount_paise or 0) / 100
+
+        decline_reason = (
+            payment_entity.get("error_reason")
+            or payment_entity.get("error_description")
+            or "insufficient_funds"
+        )
+        payment_method = payment_entity.get("method") or "upi"
+        customer_id = (
+            payment_entity.get("customer_id")
+            or subscription_entity.get("customer_id")
+            or payment_entity.get("contact")
+        )
 
         case = Case(
             razorpay_payment_id=payment_id,
@@ -111,27 +136,52 @@ def handle_event(db: Session, event_type: str, payload: dict):
             decline_reason=decline_reason,
             payment_method=payment_method,
             status="open",
-            retry_attempt_number=0,
+            retry_attempt_number=1,
         )
         db.add(case)
         db.commit()
         db.refresh(case)
         return case
 
-    if event_type in ("payment.captured", "order.paid", "payment_link.paid"):
+    if event_type in ("payment.captured", "order.paid", "payment_link.paid", "subscription.charged"):
         payment_entity = entity.get("payment", {}).get("entity", {})
+        subscription_entity = entity.get("subscription", {}).get("entity", {})
+
         payment_id = payment_entity.get("id")
+        subscription_id = subscription_entity.get("id")
 
         case = None
-        if payment_id:
-            case = db.query(Case).filter(Case.razorpay_payment_id == payment_id).first()
+        if subscription_id:
+            case = db.query(Case).filter(Case.razorpay_subscription_id == subscription_id).order_by(Case.id.desc()).first()
+        if not case and payment_id:
+            case = db.query(Case).filter(Case.razorpay_payment_id == payment_id).order_by(Case.id.desc()).first()
+
         if case:
             case.status = "recovered"
             case.recovered_amount = case.amount
             db.commit()
         return case
 
-    if event_type == "payment_link.expired":
-        return None
+    if event_type == "subscription.halted":
+        subscription_entity = entity.get("subscription", {}).get("entity", {})
+        subscription_id = subscription_entity.get("id")
+        case = None
+        if subscription_id:
+            case = db.query(Case).filter(Case.razorpay_subscription_id == subscription_id).order_by(Case.id.desc()).first()
+        if case:
+            case.status = "escalated"
+            db.commit()
+        return case
+
+    if event_type in ("subscription.cancelled", "payment_link.cancelled"):
+        subscription_entity = entity.get("subscription", {}).get("entity", {})
+        subscription_id = subscription_entity.get("id")
+        case = None
+        if subscription_id:
+            case = db.query(Case).filter(Case.razorpay_subscription_id == subscription_id).order_by(Case.id.desc()).first()
+        if case:
+            case.status = "closed"
+            db.commit()
+        return case
 
     return None
