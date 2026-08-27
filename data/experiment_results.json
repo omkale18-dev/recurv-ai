@@ -1,0 +1,102 @@
+{
+  "experiment": {
+    "data_source": "data/demo_batch.csv",
+    "total_cases": 100,
+    "group_size": 50,
+    "random_seed": 42,
+    "split_method": "Stratified 50/50 split on decline_reason",
+    "methodology": "Both groups simulate recovery outcomes on held-out test data. Control uses naive static retries (3 attempts). AI uses the policy engine (rules + ML probability + EV optimization). Channel appropriateness penalties reflect the real-world impossibility of retrying dead cards/auth-tokens without customer intervention."
+  },
+  "control": {
+    "group": "control",
+    "n": 50,
+    "recovered_count": 32,
+    "recovery_rate_pct": 64.0,
+    "total_amount": 63357.15,
+    "amount_recovered": 46580.05,
+    "avg_attempts_per_case": 1.88,
+    "wasted_retries_on_stale_tokens": 9,
+    "correct_channel_used": 0,
+    "per_decline_reason": {
+      "auth_required": {
+        "n": 5,
+        "recovered": 0,
+        "recovery_rate": 0.0,
+        "amount_recovered": 0.0
+      },
+      "bank_timeout": {
+        "n": 4,
+        "recovered": 3,
+        "recovery_rate": 75.0,
+        "amount_recovered": 3561.38
+      },
+      "expired_card": {
+        "n": 4,
+        "recovered": 0,
+        "recovery_rate": 0.0,
+        "amount_recovered": 0.0
+      },
+      "generic_decline": {
+        "n": 8,
+        "recovered": 4,
+        "recovery_rate": 50.0,
+        "amount_recovered": 5225.3
+      },
+      "insufficient_funds": {
+        "n": 29,
+        "recovered": 25,
+        "recovery_rate": 86.2,
+        "amount_recovered": 37793.37
+      }
+    }
+  },
+  "treatment": {
+    "group": "treatment",
+    "n": 50,
+    "recovered_count": 32,
+    "recovery_rate_pct": 64.0,
+    "total_amount": 70830.09,
+    "amount_recovered": 44567.17,
+    "avg_attempts_per_case": 1.24,
+    "wasted_retries_on_stale_tokens": 0,
+    "correct_channel_used": 8,
+    "per_decline_reason": {
+      "auth_required": {
+        "n": 5,
+        "recovered": 2,
+        "recovery_rate": 40.0,
+        "amount_recovered": 1262.83
+      },
+      "bank_timeout": {
+        "n": 4,
+        "recovered": 4,
+        "recovery_rate": 100.0,
+        "amount_recovered": 7965.07
+      },
+      "expired_card": {
+        "n": 5,
+        "recovered": 2,
+        "recovery_rate": 40.0,
+        "amount_recovered": 1187.31
+      },
+      "generic_decline": {
+        "n": 7,
+        "recovered": 3,
+        "recovery_rate": 42.9,
+        "amount_recovered": 1328.04
+      },
+      "insufficient_funds": {
+        "n": 29,
+        "recovered": 21,
+        "recovery_rate": 72.4,
+        "amount_recovered": 32823.92
+      }
+    }
+  },
+  "delta": {
+    "recovery_rate_pp": 0.0,
+    "incremental_amount_recovered": -2012.88,
+    "incremental_cases_recovered": 0,
+    "attempts_saved_per_case": 0.64
+  }
+}
