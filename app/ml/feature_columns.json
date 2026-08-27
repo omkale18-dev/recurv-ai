@@ -1,0 +1,21 @@
+[
+  "decline_reason_auth_required",
+  "decline_reason_bank_timeout",
+  "decline_reason_expired_card",
+  "decline_reason_generic_decline",
+  "decline_reason_insufficient_funds",
+  "decline_reason_mandate_revoked",
+  "payment_method_card",
+  "payment_method_netbanking",
+  "payment_method_upi",
+  "is_salary_window",
+  "is_subscription",
+  "amount",
+  "retry_attempt_number",
+  "previous_retries_on_this_case",
+  "days_since_last_failure",
+  "day_of_month",
+  "hour_of_day",
+  "customer_historical_success_rate",
+  "customer_tenure_days"
+]
