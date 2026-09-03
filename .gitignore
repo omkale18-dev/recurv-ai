@@ -1,6 +1,15 @@
-﻿.env
+.env
+.env.*
+!.env.example
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.db
+*.sqlite3
 venv/
+.venv/
+.pytest_cache/
 .DS_Store
+*.egg-info/
+dist/
+build/

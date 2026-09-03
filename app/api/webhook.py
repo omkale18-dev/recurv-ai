@@ -1,32 +1,28 @@
-import hashlib
+﻿import hashlib
 import hmac
 import json
+import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlalchemy.orm import Session
-from fastapi import Depends
 
 from app.models.db import get_db, Event, Case, write_audit_log
 
 load_dotenv()
-
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
 
 def verify_signature(body: bytes, signature: str, secret: str) -> bool:
-    """Verify Razorpay's webhook signature using HMAC-SHA256."""
+    # Verify HMAC-SHA256 signature from Razorpay
     if not secret:
         return False
-    expected_signature = hmac.new(
-        key=secret.encode("utf-8"),
-        msg=body,
-        digestmod=hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected_signature, signature or "")
+    expected = hmac.new(key=secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
 
 
 RELEVANT_EVENTS = {
@@ -49,6 +45,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     raw_body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature", "")
 
+    # 1. Signature verification
     if not verify_signature(raw_body, signature, WEBHOOK_SECRET):
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
@@ -59,6 +56,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     if not event_id:
         raise HTTPException(status_code=400, detail="Missing event id")
 
+    # 2. Idempotency check: ignore duplicate deliveries
     existing = db.query(Event).filter(Event.razorpay_event_id == event_id).first()
     if existing:
         return {"status": "ignored", "reason": "duplicate_event"}
@@ -77,30 +75,36 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             db,
             case_id=None,
             description=f"Received event {event_type} ({event_id})",
-            reason="Not a recovery-relevant event type; ignored.",
+            reason="Non-recovery event ignored.",
         )
         return {"status": "ignored", "reason": "not_relevant"}
 
     case = handle_event(db, event_type, payload)
 
+    # 3. Trigger recovery executor immediately on failure
+    if case and event_type in ("payment.failed", "subscription.pending"):
+        from app.policy.executor import execute_case
+        try:
+            execute_case(db, case)
+        except Exception as ex:
+            logger.error("Auto-execution failed for case #%d: %s", case.id, ex)
+
     write_audit_log(
         db,
         case_id=case.id if case else None,
         description=f"Processed event {event_type} ({event_id})",
-        reason="Recovery-relevant event; case created/updated." if case else "No case action taken.",
+        reason="Recovery-relevant event processed." if case else "No case action taken.",
     )
 
-    return {"status": "processed", "event_type": event_type}
+    return {
+        "status": "processed",
+        "event_type": event_type,
+        "case_id": case.id if case else None,
+    }
 
 
 def handle_event(db: Session, event_type: str, payload: dict):
-    """Handle incoming webhook events.
-
-    NOTE: Webhook processing is deliberately asynchronous. This handler only
-    records the event and creates/updates the Case row in the database.
-    It does NOT execute recovery actions inline, ensuring fast webhook response
-    times (<100ms) and decoupling event ingestion from action execution.
-    """
+    # Ingest event and update or create case record
     entity = payload.get("payload", {})
 
     if event_type in ("payment.failed", "subscription.pending"):
@@ -109,23 +113,37 @@ def handle_event(db: Session, event_type: str, payload: dict):
 
         payment_id = payment_entity.get("id")
         subscription_id = subscription_entity.get("id")
-        
-        # Calculate amount
+
         amount_paise = payment_entity.get("amount")
         if amount_paise is None and subscription_entity:
             amount_paise = subscription_entity.get("plan", {}).get("item", {}).get("amount", 0)
         amount = (amount_paise or 0) / 100
 
-        decline_reason = (
+        raw_reason = str(
             payment_entity.get("error_reason")
             or payment_entity.get("error_description")
-            or "insufficient_funds"
-        )
+            or "expired_card"
+        ).lower()
+
+        # Normalize gateway error code to canonical categories
+        if any(w in raw_reason for w in ("international", "expired", "token", "card_expired", "invalid_card")):
+            decline_reason = "expired_card"
+        elif any(w in raw_reason for w in ("balance", "fund", "insufficient", "limit")):
+            decline_reason = "insufficient_funds"
+        elif any(w in raw_reason for w in ("mandate", "cancel", "revoke", "paused")):
+            decline_reason = "mandate_revoked"
+        elif any(w in raw_reason for w in ("timeout", "network", "down", "unavailable")):
+            decline_reason = "bank_timeout"
+        else:
+            decline_reason = raw_reason
+
         payment_method = payment_entity.get("method") or "upi"
         customer_id = (
-            payment_entity.get("customer_id")
-            or subscription_entity.get("customer_id")
+            payment_entity.get("email")
             or payment_entity.get("contact")
+            or payment_entity.get("customer_id")
+            or subscription_entity.get("customer_id")
+            or f"cust_{payment_id or 'unknown'}"
         )
 
         case = Case(
@@ -146,15 +164,25 @@ def handle_event(db: Session, event_type: str, payload: dict):
     if event_type in ("payment.captured", "order.paid", "payment_link.paid", "subscription.charged"):
         payment_entity = entity.get("payment", {}).get("entity", {})
         subscription_entity = entity.get("subscription", {}).get("entity", {})
+        plink_entity = entity.get("payment_link", {}).get("entity", {})
 
         payment_id = payment_entity.get("id")
         subscription_id = subscription_entity.get("id")
+        notes = plink_entity.get("notes", {}) or payment_entity.get("notes", {})
+        note_case_id = notes.get("case_id")
 
         case = None
-        if subscription_id:
+        if note_case_id:
+            try:
+                case = db.query(Case).filter(Case.id == int(note_case_id)).first()
+            except (ValueError, TypeError):
+                pass
+        if not case and subscription_id:
             case = db.query(Case).filter(Case.razorpay_subscription_id == subscription_id).order_by(Case.id.desc()).first()
         if not case and payment_id:
             case = db.query(Case).filter(Case.razorpay_payment_id == payment_id).order_by(Case.id.desc()).first()
+        if not case:
+            case = db.query(Case).filter(Case.status.in_(["open", "in_progress"])).order_by(Case.id.desc()).first()
 
         if case:
             case.status = "recovered"
